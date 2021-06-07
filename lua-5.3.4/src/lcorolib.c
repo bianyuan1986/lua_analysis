@@ -35,15 +35,19 @@ static int auxresume (lua_State *L, lua_State *co, int narg) {
     lua_pushliteral(L, "cannot resume dead coroutine");
     return -1;  /* error flag */
   }
+  /*在虚拟机之间移动参数，即从主线程移动到协程虚拟机*/
   lua_xmove(L, co, narg);
+  /*执行协程*/
   status = lua_resume(co, L, narg);
   if (status == LUA_OK || status == LUA_YIELD) {
+    /*获取协程返回结果个数*/
     int nres = lua_gettop(co);
     if (!lua_checkstack(L, nres + 1)) {
       lua_pop(co, nres);  /* remove results anyway */
       lua_pushliteral(L, "too many results to resume");
       return -1;  /* error flag */
     }
+	/*把返回结果移动到虚拟机L*/
     lua_xmove(co, L, nres);  /* move yielded values */
     return nres;
   }
@@ -54,9 +58,46 @@ static int auxresume (lua_State *L, lua_State *co, int narg) {
 }
 
 
+/*
+ * As an example of how coroutines work, consider the following code:
+
+     function foo (a)
+       print("foo", a)
+       return coroutine.yield(2*a)
+     end
+
+     co = coroutine.create(function (a,b)
+           print("co-body", a, b)
+           local r = foo(a+1)
+           print("co-body", r)
+           local r, s = coroutine.yield(a+b, a-b)
+           print("co-body", r, s)
+           return b, "end"
+     end)
+
+     print("main", coroutine.resume(co, 1, 10))
+     print("main", coroutine.resume(co, "r"))
+     print("main", coroutine.resume(co, "x", "y"))
+     print("main", coroutine.resume(co, "x", "y"))
+When you run it, it produces the following output:
+
+     co-body 1       10
+     foo     2
+     main    true    4
+     co-body r
+     main    true    11      -9
+     co-body x       y
+     main    true    10      end
+     main    false   cannot resume dead coroutine
+
+ * */
 static int luaB_coresume (lua_State *L) {
+  /*从调用resume的虚拟机中获取协程对应的虚拟机，作为参数存在于栈中*/
   lua_State *co = getco(L);
   int r;
+  /*把调用resume时所使用的参数从当前虚拟机移动到协程对应的虚拟机中，使用
+   * 移动的参数作为协程参数执行协程函数后，把返回结果移动到当前虚拟机，
+   * 但是是从yield处开始执行*/
   r = auxresume(L, co, lua_gettop(L) - 1);
   if (r < 0) {
     lua_pushboolean(L, 0);
@@ -66,6 +107,7 @@ static int luaB_coresume (lua_State *L) {
   else {
     lua_pushboolean(L, 1);
     lua_insert(L, -(r + 1));
+	/*返回参数个数+'true'*/
     return r + 1;  /* return true + 'resume' returns */
   }
 }
@@ -86,11 +128,17 @@ static int luaB_auxwrap (lua_State *L) {
 }
 
 
+/*
+ * 创建lua协程
+ */
 static int luaB_cocreate (lua_State *L) {
   lua_State *NL;
   luaL_checktype(L, 1, LUA_TFUNCTION);
+  /*创建新的虚拟机*/
   NL = lua_newthread(L);
+  /*把创建协程时参数中指定的函数入栈*/
   lua_pushvalue(L, 1);  /* move function to top */
+  /*把函数从原有的虚拟机移动到协程对应的虚拟机中*/
   lua_xmove(L, NL, 1);  /* move function from L to NL */
   return 1;
 }
